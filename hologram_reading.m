@@ -49,7 +49,11 @@ end
 %% Source constants
 wavelength=linspace(305e-9,405e-9,10);
 readout_wavelength = zeros(length(wavelength),1);
+readout_wavelength_initial = zeros(length(wavelength),1);
+readout_wavelength_final = zeros(length(wavelength),1);
 readout_intensity = zeros(length(wavelength),1);
+readout_transmission_initial = zeros(length(wavelength),1);
+readout_transmission_final = zeros(length(wavelength),1);
 for i = 1:length(wavelength)
     incident_wavelength = wavelength(i);
     omega=2*pi()*c./incident_wavelength;
@@ -151,20 +155,61 @@ for i = 1:length(wavelength)
     Gcea = gpuArray(cea);
     Gceb = gpuArray(ceb);
     
+    %% Detector definition (5x5 pixel average)
+    detector_size = 5;
+    detector_half_size = floor(detector_size/2);
+    detector_center_xy = [100,400]; % [column (x-index), row (y-index)] as referenced in plots
+    % Keeping the x-index first matches the visual selection that was used
+    % previously (plotting with plot(x(100), y(400))). We convert this to
+    % [row, column] indices below so that the sampled pixels and the overlay
+    % marker refer to the same physical location.
+    detector_center_col = detector_center_xy(1);
+    detector_center_row = detector_center_xy(2);
+    row_idx = (detector_center_row-detector_half_size):(detector_center_row+detector_half_size);
+    col_idx = (detector_center_col-detector_half_size):(detector_center_col+detector_half_size);
+    if any(row_idx < 1) || any(row_idx > sy) || any(col_idx < 1) || any(col_idx > sx)
+        error('Detector indices are outside simulation domain.');
+    end
+    detector_x_vals = x(col_idx);
+    detector_y_vals = y(row_idx);
+    detector_center_position = [mean(detector_x_vals), mean(detector_y_vals)];
+    detector_rect = [detector_x_vals(1)-dx/2, detector_y_vals(end)-dy/2, numel(col_idx)*dx, numel(row_idx)*dy];
+
+    % Transmission detector manually positioned behind the hydrogel
+    transmission_center_xy = [600,600]; % [column, row] ordering
+    transmission_center_col = transmission_center_xy(1);
+    transmission_center_row = transmission_center_xy(2);
+    transmission_row_idx = (transmission_center_row-detector_half_size):(transmission_center_row+detector_half_size);
+    transmission_col_idx = (transmission_center_col-detector_half_size):(transmission_center_col+detector_half_size);
+    if any(transmission_row_idx < 1) || any(transmission_row_idx > sy) || any(transmission_col_idx < 1) || any(transmission_col_idx > sx)
+        error('Transmission detector indices are outside simulation domain.');
+    end
+    transmission_x_vals = x(transmission_col_idx);
+    transmission_y_vals = y(transmission_row_idx);
+    transmission_center_position = [mean(transmission_x_vals), mean(transmission_y_vals)];
+    transmission_rect = [transmission_x_vals(1)-dx/2, transmission_y_vals(end)-dy/2, numel(transmission_col_idx)*dx, numel(transmission_row_idx)*dy];
+    initial_average_samples = 3;
+    final_average_samples = 5;
+    wavelength_smoothing_window = 5;
+
     %% This is the field propagation loop
     ki=0;
     figure
-    
+
     nt_end = 4000;
     % exposure_intensity = zeros(size(X));
-    Ez_his = zeros(ki,1);
+    Ez_his = zeros(nt,1);
     GEz_his = gpuArray(Ez_his);
-    peak = zeros(ki,2);
+    transmission_intensity_his = zeros(nt,1);
+    Gtransmission_intensity_his = gpuArray(transmission_intensity_his);
+    peak = zeros(nt,2);
     Gpeak = gpuArray(peak);
     real_peak = [];
     Greal_peak = gpuArray(real_peak);
     reflection_wavelength = [];
     Greflection_wavelength = gpuArray(reflection_wavelength);
+    detected_initial_wavelength = NaN;
+    detected_final_wavelength = NaN;
     tic
     while ki<nt
         ki=ki+1;
@@ -185,8 +230,12 @@ for i = 1:length(wavelength)
         GHx = Gchax .* GHx + Gchbx .* (dt./mu).*(DyEz);    
         GHy = Gchay .* GHy + Gchby .* (dt./mu).*(-DxEz);
         
-        GEz_his(ki,1) = GEz(100,400);
-        if (ki >= 2) && (GEz(100,400)^2 <= GEz_his(ki-1,1)^2) && (GEz_his(ki-1,1)^2 >= GEz_his(ki-2,1)^2)
+        Gdetector_Ez = mean(GEz(row_idx,col_idx),'all');
+        GEz_his(ki,1) = Gdetector_Ez;
+        Gtransmission_patch = GEz(transmission_row_idx,transmission_col_idx);
+        Gtransmission_intensity = mean(abs(Gtransmission_patch).^2,'all');
+        Gtransmission_intensity_his(ki,1) = Gtransmission_intensity;
+        if (ki >= 3) && (GEz_his(ki,1)^2 <= GEz_his(ki-1,1)^2) && (GEz_his(ki-1,1)^2 >= GEz_his(ki-2,1)^2)
             Gpeak(ki-1,1) = dt*(ki-1);
             Gpeak(ki-1,2) = GEz_his(ki-1,1);
         end
@@ -202,37 +251,62 @@ for i = 1:length(wavelength)
             Hx = gather(GHx);
             Hy = gather(GHy);
             Ez_his = gather(GEz_his);
+            transmission_intensity_his = gather(Gtransmission_intensity_his);
             peak = gather(Gpeak);
             real_peak = gather(Greal_peak);
             reflection_wavelength = gather(Greflection_wavelength);
             subplot(2,2,1);
-            imagesc(x,y,Ez,[-1 1]/brightness)  
+            imagesc(x,y,Ez,[-1 1]/brightness)
             hold on
-            plot(x(100),y(400),'ro')
+            rectangle('Position',detector_rect,'EdgeColor','r','LineWidth',1.5)
+            plot(detector_center_position(1),detector_center_position(2),'r+','LineWidth',1.5,'MarkerSize',8)
+            rectangle('Position',transmission_rect,'EdgeColor',[0 0.6 0],'LineWidth',1.5)
+            plot(transmission_center_position(1),transmission_center_position(2),'g+','LineWidth',1.5,'MarkerSize',8)
             axis image
             title(sprintf('TimeFrame %s',num2str(ki)))
             set(gca,'ydir','normal' )
             colormap(emkc)
             alpha(1-obj1*0.1-obj2*0.15)
-    
+
             subplot(2,2,2);
             plot(dt:dt:ki*dt,Ez_his(1:ki))
             xlabel('time (second)')
             ylabel('Ez Field')
-            
+
             subplot(2,2,3);
-            plot(dt:dt:ki*dt,Ez_his(1:ki).^2)
+            plot(dt:dt:ki*dt,Ez_his(1:ki).^2,'DisplayName','Reflection region')
             hold on
-            plot(peak(peak(:,2)~=0,1),peak(peak(:,2)~=0,2).^2)
+            plot(peak(peak(:,2)~=0,1),peak(peak(:,2)~=0,2).^2,'DisplayName','Peaks')
+            plot(dt:dt:ki*dt,transmission_intensity_his(1:ki),'g','LineWidth',1.2,'DisplayName','Behind hydrogel')
             xlabel('time (second)')
             ylabel('Intensity')
+            legend('Location','best')
             hold off
     
             subplot(2,2,4);
-            plot(reflection_wavelength)
-            xlabel('time (second)')
+            cla
+            if ~isempty(reflection_wavelength)
+                smoothing_window = min(wavelength_smoothing_window,numel(reflection_wavelength));
+                smoothed_wavelength = movmean(reflection_wavelength,smoothing_window);
+                plot(reflection_wavelength,'Color',[0.7 0.7 0.7],'DisplayName','Raw');
+                hold on
+                plot(smoothed_wavelength,'r','LineWidth',1.5,'DisplayName','Smoothed');
+                initial_count = min(initial_average_samples,numel(reflection_wavelength));
+                final_count = min(final_average_samples,numel(reflection_wavelength));
+                detected_initial_wavelength = mean(reflection_wavelength(1:initial_count));
+                detected_final_wavelength = mean(reflection_wavelength(end-final_count+1:end));
+                yline(detected_initial_wavelength,'--','Initial avg','Color',[0 0.45 0.74]);
+                yline(detected_final_wavelength,'--','Final avg','Color',[0.85 0.33 0.1]);
+                legend('Location','best');
+                title(sprintf('Final \lambda: %.1f nm',detected_final_wavelength*1e9));
+                hold off
+            else
+                plot(nan,nan);
+                title('Wavelength detection pending');
+            end
+            xlabel('Peak index')
             ylabel('wavelength (m)')
-    
+
             drawnow
             if movvar==1
                 frame = getframe(gcf);
@@ -241,15 +315,61 @@ for i = 1:length(wavelength)
             tic
         end
     end
-    readout_wavelength(i) = reflection_wavelength(end);
+    reflection_wavelength = gather(Greflection_wavelength);
+    reflection_wavelength = reflection_wavelength(isfinite(reflection_wavelength) & (reflection_wavelength>0));
+    transmission_intensity_his = gather(Gtransmission_intensity_his);
+    transmission_intensity_his = transmission_intensity_his(1:ki);
+    if isempty(reflection_wavelength)
+        readout_wavelength(i) = NaN;
+        readout_wavelength_initial(i) = NaN;
+        readout_wavelength_final(i) = NaN;
+    else
+        initial_count = min(initial_average_samples,numel(reflection_wavelength));
+        final_count = min(final_average_samples,numel(reflection_wavelength));
+        detected_initial_wavelength = mean(reflection_wavelength(1:initial_count));
+        detected_final_wavelength = mean(reflection_wavelength(end-final_count+1:end));
+        readout_wavelength(i) = detected_final_wavelength;
+        readout_wavelength_initial(i) = detected_initial_wavelength;
+        readout_wavelength_final(i) = detected_final_wavelength;
+        fprintf('Detected wavelength change: initial %.2f nm -> final %.2f nm\n',detected_initial_wavelength*1e9,detected_final_wavelength*1e9);
+    end
     readout_intensity_temp = peak(peak(:,2)~=0,2).^2;
-    readout_intensity(i) = readout_intensity_temp(end);
+    if isempty(readout_intensity_temp)
+        readout_intensity(i) = NaN;
+    else
+        readout_intensity(i) = readout_intensity_temp(end);
+    end
+
+    finite_transmission = transmission_intensity_his(isfinite(transmission_intensity_his));
+    if isempty(finite_transmission)
+        readout_transmission_initial(i) = NaN;
+        readout_transmission_final(i) = NaN;
+    else
+        initial_count = min(initial_average_samples,numel(finite_transmission));
+        final_count = min(final_average_samples,numel(finite_transmission));
+        readout_transmission_initial(i) = mean(finite_transmission(1:initial_count));
+        readout_transmission_final(i) = mean(finite_transmission(end-final_count+1:end));
+    end
 end
 %% Close video
 if movvar==1
     close(writerObj);
 end
 figure
-plot(readout_wavelength,readout_intensity,'r-')
+plot(readout_wavelength_initial*1e9,readout_intensity,'--','Color',[0 0.45 0.74],'DisplayName','Initial avg')
+hold on
+plot(readout_wavelength_final*1e9,readout_intensity,'r-','DisplayName','Final avg')
+hold off
 xlabel('Wavelength (nm)')
 ylabel('Intensity')
+legend('Location','best')
+
+figure
+plot(wavelength*1e9,readout_transmission_initial,'--','Color',[0 0.6 0],'DisplayName','Initial avg behind hydrogel')
+hold on
+plot(wavelength*1e9,readout_transmission_final,'-','Color',[0 0.45 0],'DisplayName','Final avg behind hydrogel')
+hold off
+xlabel('Incident Wavelength (nm)')
+ylabel('Transmitted Intensity')
+legend('Location','best')
+title('Transmission detector intensity behind hydrogel')
