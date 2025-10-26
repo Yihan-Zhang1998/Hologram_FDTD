@@ -1,4 +1,4 @@
-%% 3D simulation
+%% 2D simulation
 % Always utilize SI units
 
 clear
