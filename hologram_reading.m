@@ -13,7 +13,7 @@ lens = imresize(imread('lens.png'),[570,570]);
 movvar=0;
 fps=30;
 if movvar==1
-    writerObj = VideoWriter('20251026_flat_mirror_reading.mp4','MPEG-4' );
+    writerObj = VideoWriter('20251026_flat_mirror_reading_farfieldFT.mp4','MPEG-4' );
     writerObj.FrameRate = fps;
     open(writerObj);
 end
@@ -48,12 +48,15 @@ end
 % emc=emcolormap(100); % EM colormap
 
 %% Source constants
-wavelength=linspace(295e-9,565e-9,10);
+wavelength=[290e-9, 355e-9, 500e-9];%linspace(295e-9,565e-9,10);
 readout_wavelength_initial = zeros(length(wavelength),1);
 readout_wavelength_final = zeros(length(wavelength),1);
 readout_intensity = zeros(length(wavelength),1);
 readout_transmission_initial = zeros(length(wavelength),1);
 readout_transmission_final = zeros(length(wavelength),1);
+theta_bin_edges = linspace(0,90,181);
+theta_bin_centers = (theta_bin_edges(1:end-1)+theta_bin_edges(2:end))/2;
+farfield_angular_intensity = NaN(length(wavelength),numel(theta_bin_centers));
 for i = 1:length(wavelength)
     incident_wavelength = wavelength(i);
     omega=2*pi()*c./incident_wavelength;
@@ -295,20 +298,20 @@ for i = 1:length(wavelength)
             subplot(2,2,3);
             time_axis = dt:dt:ki*dt;
             source_intensity_slice = source_intensity_his(1:ki);
-            reflection_intensity = Ez_his(1:ki).^2 - source_intensity_slice;
-            transmission_intensity = transmission_intensity_his(1:ki) - source_intensity_slice;
-            plot(time_axis,reflection_intensity,'DisplayName','Reflection region (minus source)')
+            reflection_intensity = Ez_his(1:ki).^2;
+            transmission_intensity = transmission_intensity_his(1:ki);
+            plot(time_axis,reflection_intensity,'DisplayName','Reflection region')
             hold on
              valid_peak_mask = peak(:,2)~=0;
             if any(valid_peak_mask)
                 peak_times = peak(valid_peak_mask,1);
                 peak_indices = max(1,min(ki,round(peak_times/dt)));
-                peak_intensity = peak(valid_peak_mask,2).^2 - source_intensity_his(peak_indices);
-                plot(peak_times,peak_intensity,'DisplayName','Peaks (minus source)')
+                peak_intensity = peak(valid_peak_mask,2).^2;
+                plot(peak_times,peak_intensity,'DisplayName','Peaks')
             end
             plot(time_axis,transmission_intensity,'g','LineWidth',1.2,'DisplayName','Behind hydrogel (minus source)')
             xlabel('time (second)')
-            ylabel('Intensity - source')
+            ylabel('Intensity')
             legend('Location','best')
             hold off
     
@@ -376,7 +379,7 @@ for i = 1:length(wavelength)
         readout_intensity(i) = readout_intensity_temp(end);
     end
 
-    baseline_subtracted_transmission = transmission_intensity_his - source_intensity_his;
+    baseline_subtracted_transmission = transmission_intensity_his;
     finite_transmission = baseline_subtracted_transmission(isfinite(baseline_subtracted_transmission));
     if isempty(finite_transmission)
         readout_transmission_initial(i) = NaN;
@@ -386,6 +389,42 @@ for i = 1:length(wavelength)
         final_count = min(final_average_samples,numel(finite_transmission));
         readout_transmission_initial(i) = mean(finite_transmission(1:initial_count));
         readout_transmission_final(i) = mean(finite_transmission(end-final_count+1:end));
+    end
+    Ez_snapshot = gather(GEz);
+    window_x = 0.5 - 0.5*cos(2*pi*(0:sx-1)/(sx-1));
+    window_y = 0.5 - 0.5*cos(2*pi*(0:sy-1)/(sy-1));
+    apodization = window_y.' * window_x;
+    Ez_apodized = Ez_snapshot .* apodization;
+    farfield_spectrum = fftshift(fft2(Ez_apodized));
+    kx_vec = (-floor(sx/2):ceil(sx/2)-1)*(2*pi/lengthx);
+    ky_vec = (-floor(sy/2):ceil(sy/2)-1)*(2*pi/lengthy);
+    [KX,KY] = meshgrid(kx_vec,ky_vec);
+    k_rho = sqrt(KX.^2 + KY.^2);
+    k0 = 2*pi/incident_wavelength;
+    propagating_mask = k_rho <= k0;
+    if any(propagating_mask,"all")
+        theta_values_deg = asind(min(1,k_rho(propagating_mask)/k0));
+        spectral_intensity = abs(farfield_spectrum(propagating_mask)).^2;
+        bin_idx = discretize(theta_values_deg,theta_bin_edges);
+        valid_bins = ~isnan(bin_idx);
+        if any(valid_bins)
+            angular_profile = accumarray(bin_idx(valid_bins),spectral_intensity(valid_bins),[numel(theta_bin_centers),1],@mean,NaN);
+            max_profile = max(angular_profile,[],'omitnan');
+            if ~(isnan(max_profile) || max_profile==0)
+                angular_profile = angular_profile./max_profile;
+            end
+            farfield_angular_intensity(i,:) = angular_profile;
+        end
+    end
+    if i == length(wavelength)
+        figure;
+        imagesc(kx_vec/k0,ky_vec/k0,log10(abs(farfield_spectrum)+eps));
+        axis image;
+        set(gca,'YDir','normal');
+        xlabel('k_x/k_0');
+        ylabel('k_y/k_0');
+        title('Log_{10} Far-field spectrum (final wavelength)');
+        colorbar;
     end
 end
 %% Close video
@@ -398,9 +437,16 @@ hold on
 plot(readout_wavelength_final*1e9,readout_intensity,'r-','DisplayName','Final avg (minus source)')
 
 hold off
-xlabel('Wavelength (nm)')
-ylabel('Intensity - source')
-legend('Location','best')
+figure;
+imagesc(theta_bin_centers, wavelength*1e9, farfield_angular_intensity);
+set(gca,'YDir','normal');
+xlabel('Observation angle (degrees)');
+ylabel('Incident wavelength (nm)');
+title('Normalized far-field angular intensity');
+colorbar;
+% xlabel('Wavelength (nm)')
+% ylabel('Intensity')
+% legend('Location','best')
 
 figure
 plot(wavelength*1e9,readout_transmission_initial,'--','Color',[0 0.6 0],'DisplayName','Initial avg behind hydrogel (minus source)')
@@ -408,6 +454,6 @@ hold on
 plot(wavelength*1e9,readout_transmission_final,'-','Color',[0 0.45 0],'DisplayName','Final avg behind hydrogel (minus source)')
 hold off
 xlabel('Incident Wavelength (nm)')
-ylabel('Transmitted Intensity - source')
+ylabel('Transmitted Intensity')
 legend('Location','best')
 title('Transmission detector intensity behind hydrogel')
