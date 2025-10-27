@@ -3,6 +3,7 @@
 % Reading
 % Whitelight source simulation.
 close all
+
 gpuDeviceTable
 GPU1 = gpuDevice(1);
 %% Import figures
@@ -10,10 +11,10 @@ msource = imresize(imread('reading_source.png'),[570,570]);
 shelter = imresize(imread('source_part.png'),[570,570]);
 lens = imresize(imread('lens.png'),[570,570]);
 %% Initialize video
-movvar=0;
+movvar=1;
 fps=30;
 if movvar==1
-    writerObj = VideoWriter('20251026_flat_mirror_reading_farfieldFT.mp4','MPEG-4' );
+    writerObj = VideoWriter('20251027_flat_mirror_reading_farfieldFT.mp4','MPEG-4' );
     writerObj.FrameRate = fps;
     open(writerObj);
 end
@@ -25,7 +26,7 @@ c=1/sqrt(epsilon0*mu0);
 
 %% Plot definitions
 brightness=0.1;  %brightness of plot
-nt=10000; %total number os time steps
+nt=3000; %total number os time steps
 waitdisp=15; %wait to display
 
 lengthx=5e-6;  %size of the image in x axis SI
@@ -48,15 +49,19 @@ end
 % emc=emcolormap(100); % EM colormap
 
 %% Source constants
-wavelength=[290e-9, 355e-9, 500e-9];%linspace(295e-9,565e-9,10);
+wavelength=linspace(300e-9,500e-9,15);%linspace(295e-9,565e-9,10);
 readout_wavelength_initial = zeros(length(wavelength),1);
 readout_wavelength_final = zeros(length(wavelength),1);
 readout_intensity = zeros(length(wavelength),1);
 readout_transmission_initial = zeros(length(wavelength),1);
 readout_transmission_final = zeros(length(wavelength),1);
-theta_bin_edges = linspace(0,90,181);
+theta_bin_edges = linspace(0,360,721);
 theta_bin_centers = (theta_bin_edges(1:end-1)+theta_bin_edges(2:end))/2;
+% Angle bins measured starting at the -x direction and rotating toward +y.
 farfield_angular_intensity = NaN(length(wavelength),numel(theta_bin_centers));
+farfield_spectrum_log = NaN(sy,sx,length(wavelength));
+kx_normalized = cell(length(wavelength),1);
+ky_normalized = cell(length(wavelength),1);
 for i = 1:length(wavelength)
     incident_wavelength = wavelength(i);
     omega=2*pi()*c./incident_wavelength;
@@ -96,11 +101,11 @@ for i = 1:length(wavelength)
     obj4 = round(double(obj4(:,:,1))/255);
     %imagesc(x,y,obj2);
 
-    RI0=1;  %Background refractive index
+    RI0=1.37;  %Background refractive index
     alpha1=log(2)/100e-9;  %Absorbtion coeficient with half loss in 100 nm
     RI1=1+1i*c*alpha1/2/omega(1); %Refractive indexwith absorption coeficient
     RI2=1.37;    %Refractive index of P1
-    RI3=1.64-RI2;  %Refractive index of P2
+    RI3=1.64;  %Refractive index of P2
     RI4=10+1i*5;    
     RI_lens = 2;
     
@@ -341,6 +346,9 @@ for i = 1:length(wavelength)
     
             drawnow
             if movvar==1
+                % if ~isopen(writerObj)
+                %     open(writerObj);
+                % end
                 frame = getframe(gcf);
                 writeVideo(writerObj,frame);
             end
@@ -402,8 +410,12 @@ for i = 1:length(wavelength)
     k_rho = sqrt(KX.^2 + KY.^2);
     k0 = 2*pi/incident_wavelength;
     propagating_mask = k_rho <= k0;
+    farfield_spectrum_log(:,:,i) = log10(abs(farfield_spectrum)+eps);
+    kx_normalized{i} = kx_vec/k0;
+    ky_normalized{i} = ky_vec/k0;
     if any(propagating_mask,"all")
-        theta_values_deg = asind(min(1,k_rho(propagating_mask)/k0));
+        theta_raw_deg = rad2deg(atan2(KY(propagating_mask),KX(propagating_mask)));
+        theta_values_deg = mod(180 - theta_raw_deg,360);
         spectral_intensity = abs(farfield_spectrum(propagating_mask)).^2;
         bin_idx = discretize(theta_values_deg,theta_bin_edges);
         valid_bins = ~isnan(bin_idx);
@@ -416,16 +428,8 @@ for i = 1:length(wavelength)
             farfield_angular_intensity(i,:) = angular_profile;
         end
     end
-    if i == length(wavelength)
-        figure;
-        imagesc(kx_vec/k0,ky_vec/k0,log10(abs(farfield_spectrum)+eps));
-        axis image;
-        set(gca,'YDir','normal');
-        xlabel('k_x/k_0');
-        ylabel('k_y/k_0');
-        title('Log_{10} Far-field spectrum (final wavelength)');
-        colorbar;
-    end
+    % save(sprintf("hologram_reading_lambda_%s.mat",wavelength(i)))
+    % open(writerObj);
 end
 %% Close video
 if movvar==1
@@ -440,14 +444,26 @@ hold off
 figure;
 imagesc(theta_bin_centers, wavelength*1e9, farfield_angular_intensity);
 set(gca,'YDir','normal');
-xlabel('Observation angle (degrees)');
+xlabel('Angle from -x toward +y (degrees)');
 ylabel('Incident wavelength (nm)');
 title('Normalized far-field angular intensity');
 colorbar;
 % xlabel('Wavelength (nm)')
 % ylabel('Intensity')
 % legend('Location','best')
-
+for i_plot = 1:length(wavelength)
+    spectrum_log = farfield_spectrum_log(:,:,i_plot);
+    if any(isfinite(spectrum_log),'all')
+        figure;
+        imagesc(kx_normalized{i_plot}, ky_normalized{i_plot}, spectrum_log);
+        axis image;
+        set(gca,'YDir','normal');
+        xlabel('k_x/k_0');
+        ylabel('k_y/k_0');
+        title(sprintf('Log_{10} far-field spectrum (%.0f nm)', wavelength(i_plot)*1e9));
+        colorbar;
+    end
+end
 figure
 plot(wavelength*1e9,readout_transmission_initial,'--','Color',[0 0.6 0],'DisplayName','Initial avg behind hydrogel (minus source)')
 hold on
@@ -457,3 +473,5 @@ xlabel('Incident Wavelength (nm)')
 ylabel('Transmitted Intensity')
 legend('Location','best')
 title('Transmission detector intensity behind hydrogel')
+save("hologram_reading.mat")
+% broadband_light
